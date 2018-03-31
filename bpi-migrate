@@ -1,6 +1,7 @@
 #!/bin/bash
 #GPL
 #set -x
+set -e
 BPILICENSE="GPLv2 or any later version"
 BPICMD="bpi-migrate"
 BPICMDVERSION="v1.3.7a(github)"
@@ -113,6 +114,7 @@ Options:
   -r, --root rootfile             user root file for BPI-ROOT (ex. root.tgz)
   -b, --boot bootfile             user boot file for BPI-BOOT (ex. boot.tgz)
   -s, --size                      image size(defaut: 7456 MB for eMMC)
+  -p, --pvr                       build pvr repo and/or pvr based factory image
   -B, --BOOTSIZE                  BPI-BOOT partition size(default: 256 MB)
   -I, --IMGDISK                   IMG TYPE ('-sd' '-emmc' '-sd-emmc')
   -V, --IMGVER                    IMG VERSION ('-demo' '-preview' '-beta') 
@@ -443,7 +445,7 @@ create_new_disk() {
   echo "########################"
   echo
   sudo mkfs.vfat "${LOOP_PART_BOOT}" -I -n BPI-BOOT
-  sudo mkfs.ext4 -O ^has_journal -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
+  sudo mkfs.ext4 -O ^has_journal,^64bit,^metadata_csum -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
   sudo sync
 }
 
@@ -499,7 +501,7 @@ create_new_image() {
   echo "########################"
   echo
   sudo mkfs.vfat "${LOOP_PART_BOOT}" -I -n BPI-BOOT
-  sudo mkfs.ext4 -O ^has_journal -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
+  sudo mkfs.ext4 -O ^has_journal,^64bit,^metadata_csum -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
   sudo sync
 }
 
@@ -586,12 +588,12 @@ BOOTDIR=/mnt
   for IN in ${BOOTFILES} ; do
     get_bpi_github ${IN}
     if [ -f "${IN}" ] ; then
-      echo tar xf $IN --keep-directory-symlink -C $BOOTDIR
-      tar xf $IN --keep-directory-symlink -C $BOOTDIR 2>/dev/null
+      echo tar xf $IN --no-same-owner --keep-directory-symlink -C $BOOTDIR
+      tar xf $IN --no-same-owner --keep-directory-symlink -C $BOOTDIR
     else
       if [ -d "${IN}" ] ; then
         echo tar from dir ${IN}
-        (cd ${IN} ; tar cf - .) | (cd $BOOTDIR ; tar xf -)
+        (cd ${IN} ; tar cf - .) | (cd $BOOTDIR ; tar xf - --no-same-owner)
       else
         echo "Warning: CAN NOT OPEN BOOTFILE file ${IN}"
       fi
@@ -631,6 +633,149 @@ ROOTDIR=/mnt
   sudo sync
   ls -al $ROOTDIR
   sudo umount $ROOTDIR
+}
+
+# pvr merges everything rootfileish into a single 
+make_bpi_pvr() {
+  if [ -z "$PVRMODE" ]; then
+    return
+  fi
+
+  echo "Make PVR... "
+  rootdir=`mktemp -d -t bprootdir.XXXXX`
+  pvrd=`mktemp -d -t bpipvr.XXXXX`
+  # step1: make rootd and bootd from configs and dirs provided
+  rootd=`mktemp -d -t bpirootd.XXXXX`
+  bootd=`mktemp -d -t bpibootd.XXXXX`
+  for IN in ${ROOTFILE} ${BPIFILES} ; do
+    get_bpi_github ${IN}
+    if [ -f "${IN}" ] ; then
+      echo tar xvf $IN --keep-directory-symlink -C $rootd
+      tar xf $IN --keep-directory-symlink -C $rootd
+    else
+      if [ -d "${IN}" ] ; then
+        echo tar from dir ${ROOTFILE}
+        (cd ${IN} ; tar cf - .) | (cd $rootd ; tar xf -)
+      else
+        echo "Warning: CAN NOT OPEN rootfs file ${IN}"
+      fi
+    fi
+  done
+  for IN in ${BOOTFILES} ; do
+    get_bpi_github ${IN}
+    if [ -f "${IN}" ] ; then
+      echo tar xf $IN --keep-directory-symlink -C $bootd
+      tar xf $IN --keep-directory-symlink -C $bootd 2>/dev/null
+    else
+      if [ -d "${IN}" ] ; then
+        echo tar from dir ${IN}
+        (cd ${IN} ; tar cf - .) | (cd $bootd ; tar xf -)
+      else
+        echo "Warning: CAN NOT OPEN BOOTFILE file ${IN}"
+      fi
+    fi
+  done
+
+  # pv'ize uenv ...
+  cat >> $bootd/bananapi/$BPIBOARD/linux/uEnv.txt << EOFa
+baseargs=root=/dev/ram rootfstype=ramfs init=/init console=earlyprintk console=tty1 fbcon=map:0 console=ttyS0,115200
+filesize=1c5
+loadargs=setenv bootargs "\${baseargs} pv_try=\${pv_try} pv_rev=${boot_rev} panic=2 $\{args}"
+loadenv_mmc=load mmc \${disk}:\${mmcdata} \${scriptaddr} /boot/uboot.txt;
+loadenv=if test "\${pv_fstype}" = "ubi"; then loadenv_ubi; else run loadenv_mmc; fi; setenv pv_try; env import -b \${scriptaddr} 0x400; if env exists pv_try; then if env exists pv_trying && test \${pv_trying} = \${pv_try}; then setenv pv_trying; saveenv; setenv boot_rev \${pv_rev}; else setenv pv_trying \${pv_try}; saveenv; setenv boot_rev \${pv_trying}; fi; else setenv boot_rev \${pv_rev}; fi;
+loadstep_mmc=run loadenv; load mmc \${disk}:\${mmcdata} \${loadaddr} /trails/\${boot_rev}/.pv/pv-kernel.img; load mmc \${disk}:\${mmcdata} \${rdaddr} /trails/\${boot_rev}/.pv/pv-initrd.img; setenv \${rd_size} \${filesize};
+loadstep_ubi=ubi part \${pv_ubipart}; ubifsmount ubi0:\${pv_ubipart}; run loadenv; ubifsload \${loadaddr} /trails/\${boot_rev}/.pv/pv-kernel.img; ubifsload \${rdaddr} /trails/\${boot_rev}/.pv/pv-initrd.img;
+loadstep=if test "\${pv_fstype}" = "ubi"; then loadstep_ubi; else run loadstep_mmc; fi; setenv rd_size \${filesize}
+bootcmd=run loadstep; run loadargs; bootm \${loadaddr} \${rdaddr}:\${rd_size}; echo "Failed to boot step, rebooting"; sleep 1; reset
+pv_fstype=mmc
+mmcboot=1
+mmcdata=2
+uenvcmd=run ahello bootcmd
+EOFa
+
+  echo "Make PVR... bpi-root squash"
+  # step2: make the squash for bpi-root plat
+  mksquashfs $rootd $pvrd/bpi-root.squashfs -comp xz
+
+  # create bpi-root platform manifest
+  cat > $pvrd/bpi-root.json << EOF
+{ "configs": [ "bpi-root.lxc.config" ], "exec": "/sbin/init", "name": "bpi-root", "share": [ "NETWORK", "UTS", "IPC" ], "type": "lxc" }
+EOF
+
+  ## create the lxc config for bpi-root plat
+  cat > $pvrd/bpi-root.lxc.config << EOF1
+lxc.tty = 4
+lxc.pts = 1024
+# Default cgroups - all denied except those whitelisted
+lxc.cgroup.devices.allow = a
+# name
+lxc.utsname = major
+lxc.rootfs = overlayfs:/volumes/bpi-root.squashfs:/storage/bpi-root.disk/upper
+# devices
+lxc.mount.auto = proc sys cgroup-full
+lxc.mount.entry = /dev dev none bind,rw,create=dir 0 0
+# Mount /run as tmpfs.
+lxc.mount.entry=tmpfs /run tmpfs rw,nodev,relatime,mode=755 0 0
+# Mount /dev/shm as tmpfs; needed for building python and possibly other packages.
+lxc.mount.entry=shm dev/shm tmpfs rw,nodev,noexec,nosuid,relatime,mode=1777,create=dir 0 0
+EOF1
+
+  mv $bootd/bananapi/$BPIBOARD/linux/uImage $pvrd/kernel.img
+
+  ## lets get pantavisor initrd
+  get_bpi_github 0pv-generic.cpio.xz
+  cp -f 0pv-generic.cpio.xz $pvrd/0pv-generic.cpio.xz
+
+  ## and off we go for the system manifest
+  cat > $pvrd/pantavisor.json << EOF2
+{ "initrd": [ "0pv-generic.cpio.xz" ], "linux": "kernel.img", "platforms:": [ "bpi-root" ], "volumes": [ "bpi-root.squashfs" ] }
+EOF2
+  echo pantavirso.json:
+  cat $pvrd/pantavisor.json 
+
+  ## now remember ... we are pvr...
+  sh -c "set -x; cd $pvrd; pvr init; pvr add .; pvr commit"
+
+  ## step 3 transfer our pvr as factory state to rootd
+  mkdir -p $rootdir/trails/0
+  cp -a $pvrd/.pvr $rootdir/trails/0
+  sh -c "cd $rootdir/trails/0; pvr checkout"
+
+  ## step 3a lets add pv canonical hardlinks used byt bootloader
+  mkdir -p $rootdir/trails/0/.pv
+  ln $rootdir/trails/0/kernel.img $rootdir/trails/0/.pv/pv-kernel.img
+  ln $rootdir/trails/0/0pv-generic.cpio.xz $rootdir/trails/0/.pv/pv-initrd.img
+
+  ## step 4 create /boot/uboot.txt for factory state
+  set -x
+  mkdir -p $rootdir/boot
+  echo -n -e "pv_rev=0\0" > $rootdir/boot/uboot.txt
+  ls  $rootdir/boot/
+  set +x
+
+  ## step 5 move objects to central repo place on disk
+  mv $rootdir/trails/0/.pvr/objects $rootdir/objects
+
+  ## step 6 put pantahub.config in place, yay!
+  mkdir -p $rootdir/config
+  cat > $rootdir/config/pantahub.config << EOF3
+log.level=5
+log.buf_nitems=16
+updater.interval=5
+updater.network_timeout=60
+creds.host=api.pantahub.com
+creds.port=443
+creds.id=
+creds.prn=
+creds.secret=
+EOF3
+
+ tar -C $rootdir -cvzf bpi-pvrroot.tgz .
+ tar -C $bootd -cvzf bpi-pvrboot.tgz .
+ ROOTFILE=bpi-pvrroot.tgz
+ BPIFILES=
+ BOOTFILES="bpi-pvrboot.tgz"
+ IMGDISK="$IMGDISK"-pvr
 }
 
 release_loopdev() {
@@ -849,7 +994,9 @@ bpi_createnewdisk() {
   create_new_disk
   #step 2: 100MB
   write_uboot
-  #
+
+  # step 3.pre: make pvr if applicable
+  make_bpi_pvr
   #step 3: 256MB
   write_bpi_boot
   #
@@ -889,8 +1036,12 @@ bpi_migratefromroot() {
   #step 1: 7456MB(emmc size)
   create_new_image
   #step 2: 100MB
+
   write_uboot
-  #
+
+  ## step 3.pre: make pvr if applicable
+  make_bpi_pvr
+
   #step 3: 256MB
   write_bpi_boot
   #
@@ -1092,12 +1243,12 @@ bpi_migrate_main()
 }
 
 #step 0: main/getopt
-BPICMDOPT="c:r:U:b:i:d:S:D:s:B:uGI:V:vh"
+BPICMDOPT="c:r:U:b:pi:d:S:D:s:B:uGI:V:vh"
 
 GETOPTEST=`getopt --version`
 case $GETOPTEST in
 getopt*) # GNU getopt
-  BPI_TEMP=`getopt -l config: -l root: -l uboot: -l boot: -l imgfile: -l device: -l src: -l dst: -l size: -l update -l download -l BOOTSIZE: -l IMGDISK: -l IMGVER: -l version -l help -- +${BPICMDOPT} "$@"`
+  BPI_TEMP=`getopt -l config: -l root: -l uboot: -l boot: -l pvr -l imgfile: -l device: -l src: -l dst: -l size: -l update -l download -l BOOTSIZE: -l IMGDISK: -l IMGVER: -l version -l help -- +${BPICMDOPT} "$@"`
   ;;
 *) # POSIX getopt ?
   BPI_TEMP=`getopt ${BPICMDOPT} "$@"`
@@ -1139,8 +1290,12 @@ while test "X$1" != "X--"; do
        ;;
     -b|--boot)
        shift
-       BOOTFILE="$1"
-       echo "BOOTFILE=${BOOTFILE}"
+       BOOTFILES="$1"
+       echo "BOOTFILES=${BOOTFILES}"
+       ;;
+    -p|--pvr)
+       PVRMODE="-pvr"
+       echo "PVRMODE=${PVRMODE}"
        ;;
     -i|--imgfile)
        shift
