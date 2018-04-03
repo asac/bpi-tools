@@ -190,15 +190,11 @@ get_bpi_github() {
     for D in ${DIRS} ; do
       U="${URLBASE}/${D}/${FILE}"
       #echo $U
-      curl -s -L $U > $FILE
-      SHELLCMD=$?
-      if [ ! $SHELLCMD -eq 0 ] ; then
+      if ! curl -s -L $U > $FILE; then
         rm -f $FILE
         continue
       fi
-      grep "Not Found" $FILE 2>&1 >/dev/null
-      SHELLCMD=$?
-      if [ $SHELLCMD -eq 0 ] ; then
+      if grep "Not Found" $FILE 2>&1 >/dev/null; then
         rm -f $FILE
       else
         echo $U
@@ -648,7 +644,9 @@ make_bpi_pvr() {
   rootd=`mktemp -d -t bpirootd.XXXXX`
   bootd=`mktemp -d -t bpibootd.XXXXX`
   for IN in ${ROOTFILE} ${BPIFILES} ; do
-    get_bpi_github ${IN}
+    if [ ! -d "${IN}" ] ; then
+      get_bpi_github ${IN} || true
+    fi
     if [ -f "${IN}" ] ; then
       echo tar xvf $IN --keep-directory-symlink -C $rootd
       tar xf $IN --keep-directory-symlink -C $rootd
@@ -662,7 +660,9 @@ make_bpi_pvr() {
     fi
   done
   for IN in ${BOOTFILES} ; do
-    get_bpi_github ${IN}
+    if [ ! -d "${IN}" ] ; then
+      get_bpi_github ${IN} || true
+    fi
     if [ -f "${IN}" ] ; then
       echo tar xf $IN --keep-directory-symlink -C $bootd
       tar xf $IN --keep-directory-symlink -C $bootd 2>/dev/null
