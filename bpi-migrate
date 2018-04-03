@@ -167,7 +167,7 @@ download_index() {
 get_conffile() {
   CONFDIRS=". board os tools pkg"
   FILE=$1
-  if [ ! -f "${FILE}" ] ; then
+  if [ ! -e "${FILE}" ] ; then
     echo "Wait for download $FILE ..."
     for IN in ${CONFDIRS} ; do
       U="${URLCONF}/${IN}/${FILE}"
@@ -772,6 +772,7 @@ EOF3
 
  tar -C $rootdir -cvzf bpi-pvrroot.tgz .
  tar -C $bootd -cvzf bpi-pvrboot.tgz .
+ SIZE=$(( $SIZE + 16 ))
  ROOTFILE=bpi-pvrroot.tgz
  BPIFILES=
  BOOTFILES="bpi-pvrboot.tgz"
@@ -989,14 +990,15 @@ bpi_createnewdisk() {
   date
   #blue_led_on
   umount_device
+  # step 0: make pvr if applicable
+  make_bpi_pvr
+
   #
   #step 1: 7456MB(emmc size)
   create_new_disk
   #step 2: 100MB
   write_uboot
 
-  # step 3.pre: make pvr if applicable
-  make_bpi_pvr
   #step 3: 256MB
   write_bpi_boot
   #
@@ -1031,6 +1033,9 @@ bpi_migratefromroot() {
   echo "=============================================================="
   STARTTIME=`date +%s`
   date
+  ## step 3.pre: make pvr if applicable
+  make_bpi_pvr
+
   #blue_led_on
   #
   #step 1: 7456MB(emmc size)
@@ -1038,9 +1043,6 @@ bpi_migratefromroot() {
   #step 2: 100MB
 
   write_uboot
-
-  ## step 3.pre: make pvr if applicable
-  make_bpi_pvr
 
   #step 3: 256MB
   write_bpi_boot
