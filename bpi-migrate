@@ -76,6 +76,7 @@ BPIURLNEW=""
 ## URLBASE
 #
 URLBASE="https://github.com/BPI-SINOVOIP/BPI-files/raw/master"
+URLBASE_user="https://github.com/asac/BPI-pvfiles/raw/master"
 #
 ## URLCONF
 #
@@ -187,20 +188,22 @@ get_bpi_github() {
   DIRS=". SD/BPI-ROOT SD/BPI-BOOT SD/100MB rootfs"
   if [ ! -f "${FILE}" ] ; then
     echo "Wait for download $FILE ..."
-    for D in ${DIRS} ; do
-      U="${URLBASE}/${D}/${FILE}"
-      #echo $U
-      if ! curl -s -L $U > $FILE; then
-        rm -f $FILE
-        continue
-      fi
-      if grep "Not Found" $FILE 2>&1 >/dev/null; then
-        rm -f $FILE
-      else
-        echo $U
-        echo "OK!!\n"
-        break 
-      fi
+    for UB in ${URLBASE} ${URLBASE_user}; do
+      for D in ${DIRS} ; do
+        U="${UB}/${D}/${FILE}"
+        #echo $U
+        if ! curl -f -s -L $U > $FILE; then
+          rm -f $FILE
+          continue
+        fi
+        if grep "Not Found" $FILE 2>&1 >/dev/null; then
+          rm -f $FILE
+        else
+          echo $U
+          echo "OK!!\n"
+          break 
+        fi
+      done
     done
   fi
 }
@@ -441,7 +444,8 @@ create_new_disk() {
   echo "########################"
   echo
   sudo mkfs.vfat "${LOOP_PART_BOOT}" -I -n BPI-BOOT
-  sudo mkfs.ext4 -O ^has_journal,^64bit,^metadata_csum -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
+  sudo mkfs.ext4 -O ^64bit,^metadata_csum -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
+  #sudo mkfs.ext4 -O ^has_journal,^64bit,^metadata_csum -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
   sudo sync
 }
 
@@ -497,7 +501,8 @@ create_new_image() {
   echo "########################"
   echo
   sudo mkfs.vfat "${LOOP_PART_BOOT}" -I -n BPI-BOOT
-  sudo mkfs.ext4 -O ^has_journal,^64bit,^metadata_csum -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
+  sudo mkfs.ext4 -O ^64bit,^metadata_csum -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
+#  sudo mkfs.ext4 -O ^has_journal,^64bit,^metadata_csum -E stride=2,stripe-width=1024 -b 4096 "${LOOP_PART_SYS}" -L BPI-ROOT
   sudo sync
 }
 
@@ -642,10 +647,16 @@ make_bpi_pvr() {
   pvrd=`mktemp -d -t bpipvr.XXXXX`
   # step1: make rootd and bootd from configs and dirs provided
   rootd=`mktemp -d -t bpirootd.XXXXX`
+  configd=`mktemp -d -t bpiconfigd.XXXXX`
+  fwd=`mktemp -d -t bpifwd.XXXXX`
+  mod=`mktemp -d -t bpimod.XXXXX`
   bootd=`mktemp -d -t bpibootd.XXXXX`
   for IN in ${ROOTFILE} ${BPIFILES} ; do
     if [ ! -d "${IN}" ] ; then
       get_bpi_github ${IN} || true
+    fi
+    if echo ${IN} | grep -q "$BPIKERNELVERSION"; then
+      continue
     fi
     if [ -f "${IN}" ] ; then
       echo tar xvf $IN --keep-directory-symlink -C $rootd
@@ -676,9 +687,29 @@ make_bpi_pvr() {
     fi
   done
 
+  mkdir -p $configd/proc/ $configd/usr/bin/
+  echo -n -e "earlyprintk fbcon=map:0 debug=7 initcall_debug=0\n" > $configd/proc/cmdline
+  # create dev hook that removes S and AMA serials
+  cat > $configd/usr/bin/lxc.hook.autodev.bpi-root <<EOFA
+#!/bin/sh
+
+rm -vf \$LXC_ROOTFS_MOUNT/dev/ttyS*
+rm -vf \$LXC_ROOTFS_MOUNT/dev/ttyAMA*
+
+EOFA
+  chmod 0755 $configd/usr/bin/lxc.hook.autodev.bpi-root
+
+  mkdir -p $configd/etc
+  cat > $configd/etc/mdev.conf <<EOFB
+ttyS[0-9][0-9]* 0:0 660 !
+ttyAMA[0-9][0-9]* 0:0 660 !
+EOFB
+  mksquashfs $configd $pvrd/bpi-config.squashfs -comp xz
+
+
   # pv'ize uenv ...
   cat >> $bootd/bananapi/$BPIBOARD/linux/uEnv.txt << EOFa
-baseargs=root=/dev/ram rootfstype=ramfs init=/init console=earlyprintk console=tty1 fbcon=map:0 console=ttyS0,115200
+baseargs=root=/dev/ram rootfstype=ramfs init=/init console=earlyprintk console=tty1 fbcon=map:0 vmalloc=496M debug=7 initcall_debug=0 console=ttyS0,115200
 filesize=1c5
 loadargs=setenv bootargs "\${baseargs} pv_try=\${pv_try} pv_rev=${boot_rev} panic=2 $\{args}"
 loadenv_mmc=load mmc \${disk}:\${mmcdata} \${scriptaddr} /boot/uboot.txt;
@@ -693,9 +724,27 @@ mmcdata=2
 uenvcmd=run ahello bootcmd
 EOFa
 
+  if [ -e $rootd/etc/init.d/udev ]; then
+	  echo "Make PVR... patch udev for in container"
+	  sed -i 's/^if.*ps.*ax.*egrep.*\[.;/if false;/' $rootd/etc/init.d/udev
+  fi
+
   echo "Make PVR... bpi-root squash"
-  # step2: make the squash for bpi-root plat
+  # step2: make the squash for bpi-root plat after creating default mountpoints
+  mkdir -p $rootd/media/usb $rootd/media/floppy $rootd/media/cdrom $rootd/pantavisor
   mksquashfs $rootd $pvrd/bpi-root.squashfs -comp xz
+
+  echo "Make PVR... firmware squash"
+  # step2: make the squash for bpi-root plat
+  tar -C $rootd -c lib/firmware | tar -C $fwd -x
+  mksquashfs $fwd $pvrd/bpi-firmware.squashfs -comp xz
+
+  echo "Make PVR... modules squash"
+  # step2: make the squash for bpi-root plat
+  tar -C $mod -x -f $BPIKERNELVERSION-net.tgz
+  depmod -b $mod $BPIKERNELVERSION
+  mksquashfs $mod/lib/modules/$BPIKERNELVERSION/ $pvrd/modules.squashfs -comp xz
+
 
   # create bpi-root platform manifest
   cat > $pvrd/bpi-root.json << EOF
@@ -704,20 +753,27 @@ EOF
 
   ## create the lxc config for bpi-root plat
   cat > $pvrd/bpi-root.lxc.config << EOF1
+lxc.logfile = /tmp/lxc.log
+lxc.loglevel = 1
 lxc.tty = 4
 lxc.pts = 1024
+lxc.autodev = 0
+lxc.hook.autodev = /volumes/bpi-config.squashfs/usr/bin/lxc.hook.autodev.bpi-root
 # Default cgroups - all denied except those whitelisted
 lxc.cgroup.devices.allow = a
 # name
-lxc.utsname = major
+lxc.utsname = bpipv
 lxc.rootfs = overlayfs:/volumes/bpi-root.squashfs:/storage/bpi-root.disk/upper
 # devices
 lxc.mount.auto = proc sys cgroup-full
-lxc.mount.entry = /dev dev none bind,rw,create=dir 0 0
+lxc.mount.entry = /storage/media/usb media/usb none bind,rw 0 0
+lxc.mount.entry = /storage/media/usb media/floppy none bind,rw 0 0
+lxc.mount.entry = /storage/media/usb media/cdrom none bind,rw 0 0
 # Mount /run as tmpfs.
 lxc.mount.entry=tmpfs /run tmpfs rw,nodev,relatime,mode=755 0 0
-# Mount /dev/shm as tmpfs; needed for building python and possibly other packages.
-lxc.mount.entry=shm dev/shm tmpfs rw,nodev,noexec,nosuid,relatime,mode=1777,create=dir 0 0
+# Mount cmdline overload from config squash
+lxc.mount.entry=/volumes/bpi-config.squashfs/proc/cmdline proc/cmdline none bind,create=file 0 0
+lxc.mount.entry=/volumes/bpi-config.squashfs/etc/mdev.conf etc/mdev.conf none bind,create=file 0 0
 EOF1
 
   mv $bootd/bananapi/$BPIBOARD/linux/uImage $pvrd/kernel.img
@@ -728,9 +784,9 @@ EOF1
 
   ## and off we go for the system manifest
   cat > $pvrd/pantavisor.json << EOF2
-{ "initrd": [ "0pv-generic.cpio.xz" ], "linux": "kernel.img", "platforms:": [ "bpi-root" ], "volumes": [ "bpi-root.squashfs" ] }
+{ "initrd": [ "0pv-generic.cpio.xz" ], "firmware": "/volumes/bpi-firmware.squashfs", "linux": "kernel.img", "platforms:": [ "bpi-root" ], "volumes": [ "bpi-root.squashfs", "bpi-config.squashfs", "bpi-firmware.squashfs", "modules.squashfs" ] }
 EOF2
-  echo pantavirso.json:
+  echo pantavisor.json:
   cat $pvrd/pantavisor.json 
 
   ## now remember ... we are pvr...
@@ -770,6 +826,13 @@ creds.prn=
 creds.secret=
 EOF3
 
+ ## step 7 put shared media in place
+ mkdir -p $rootdir/media/usb
+ mkdir -p $rootdir/media/cdrom
+ mkdir -p $rootdir/media/floppy
+
+ ## dedupe all (for pvr) ...
+ hardlink -t -v $rootdir
  tar -C $rootdir -cvzf bpi-pvrroot.tgz .
  tar -C $bootd -cvzf bpi-pvrboot.tgz .
  SIZE=$(( $SIZE + 16 ))
