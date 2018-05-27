@@ -76,7 +76,7 @@ BPIURLNEW=""
 ## URLBASE
 #
 URLBASE="https://github.com/BPI-SINOVOIP/BPI-files/raw/master"
-URLBASE_user="https://github.com/asac/BPI-pvfiles/raw/master"
+URLBASE_overlay="https://github.com/asac/BPI-files-pv/raw/master"
 #
 ## URLCONF
 #
@@ -168,6 +168,8 @@ download_index() {
 get_conffile() {
   CONFDIRS=". board os tools pkg"
   FILE=$1
+  get_bpi_github $FILE
+
   if [ ! -e "${FILE}" ] ; then
     echo "Wait for download $FILE ..."
     for IN in ${CONFDIRS} ; do
@@ -185,10 +187,11 @@ get_conffile() {
 
 get_bpi_github() {
   FILE=$1
-  DIRS=". SD/BPI-ROOT SD/BPI-BOOT SD/100MB rootfs"
+  DIRS=". SD/BPI-ROOT SD/BPI-BOOT SD/100MB rootfs boards"
   if [ ! -f "${FILE}" ] ; then
     echo "Wait for download $FILE ..."
-    for UB in ${URLBASE} ${URLBASE_user}; do
+    found=
+    for UB in ${URLBASE_overlay} ${URLBASE}; do
       for D in ${DIRS} ; do
         U="${UB}/${D}/${FILE}"
         #echo $U
@@ -201,9 +204,11 @@ get_bpi_github() {
         else
           echo $U
           echo "OK!!\n"
+	  found=1
           break 
         fi
       done
+      [ -n "$found" ] && break
     done
   fi
 }
@@ -711,12 +716,11 @@ EOFB
   cat >> $bootd/bananapi/$BPIBOARD/linux/uEnv.txt << EOFa
 baseargs=root=/dev/ram rootfstype=ramfs init=/init console=earlyprintk console=tty1 fbcon=map:0 vmalloc=496M debug=7 initcall_debug=0 console=ttyS0,115200
 filesize=1c5
-loadargs=setenv bootargs "\${baseargs} pv_try=\${pv_try} pv_rev=${boot_rev} panic=2 $\{args}"
+loadargs=setenv bootargs "\${baseargs} pv_try=\${pv_try} pv_rev=\${boot_rev} panic=2 $\{args}"
 loadenv_mmc=load mmc \${disk}:\${mmcdata} \${scriptaddr} /boot/uboot.txt;
-loadenv=if test "\${pv_fstype}" = "ubi"; then loadenv_ubi; else run loadenv_mmc; fi; setenv pv_try; env import -b \${scriptaddr} 0x400; if env exists pv_try; then if env exists pv_trying && test \${pv_trying} = \${pv_try}; then setenv pv_trying; saveenv; setenv boot_rev \${pv_rev}; else setenv pv_trying \${pv_try}; saveenv; setenv boot_rev \${pv_trying}; fi; else setenv boot_rev \${pv_rev}; fi;
+loadenv=run loadenv_mmc; setenv pv_try; env import -b \${scriptaddr} 0x400; if env exists pv_try; then if env exists pv_trying && test \${pv_trying} = \${pv_try}; then setenv pv_trying; saveenv; setenv boot_rev \${pv_rev}; else setenv pv_trying \${pv_try}; saveenv; setenv boot_rev \${pv_trying}; fi; else setenv boot_rev \${pv_rev}; fi;
 loadstep_mmc=run loadenv; load mmc \${disk}:\${mmcdata} \${loadaddr} /trails/\${boot_rev}/.pv/pv-kernel.img; load mmc \${disk}:\${mmcdata} \${rdaddr} /trails/\${boot_rev}/.pv/pv-initrd.img; setenv \${rd_size} \${filesize};
-loadstep_ubi=ubi part \${pv_ubipart}; ubifsmount ubi0:\${pv_ubipart}; run loadenv; ubifsload \${loadaddr} /trails/\${boot_rev}/.pv/pv-kernel.img; ubifsload \${rdaddr} /trails/\${boot_rev}/.pv/pv-initrd.img;
-loadstep=if test "\${pv_fstype}" = "ubi"; then loadstep_ubi; else run loadstep_mmc; fi; setenv rd_size \${filesize}
+loadstep=run loadstep_mmc; setenv rd_size \${filesize}
 bootcmd=run loadstep; run loadargs; bootm \${loadaddr} \${rdaddr}:\${rd_size}; echo "Failed to boot step, rebooting"; sleep 1; reset
 pv_fstype=mmc
 mmcboot=1
@@ -779,12 +783,12 @@ EOF1
   mv $bootd/bananapi/$BPIBOARD/linux/uImage $pvrd/kernel.img
 
   ## lets get pantavisor initrd
-  get_bpi_github 0pv-generic.cpio.xz
-  cp -f 0pv-generic.cpio.xz $pvrd/0pv-generic.cpio.xz
+  get_bpi_github 0pantavisor.cpio.xz
+  cp -f 0pantavisor.cpio.xz $pvrd/0pantavisor.cpio.xz
 
   ## and off we go for the system manifest
   cat > $pvrd/pantavisor.json << EOF2
-{ "initrd": [ "0pv-generic.cpio.xz" ], "firmware": "/volumes/bpi-firmware.squashfs", "linux": "kernel.img", "platforms:": [ "bpi-root" ], "volumes": [ "bpi-root.squashfs", "bpi-config.squashfs", "bpi-firmware.squashfs", "modules.squashfs" ] }
+{ "initrd": "0pantavisor.cpio.xz", "firmware": "/volumes/bpi-firmware.squashfs", "linux": "kernel.img", "platforms:": [ "bpi-root" ], "volumes": [ "bpi-root.squashfs", "bpi-config.squashfs", "bpi-firmware.squashfs", "modules.squashfs" ] }
 EOF2
   echo pantavisor.json:
   cat $pvrd/pantavisor.json 
@@ -800,7 +804,7 @@ EOF2
   ## step 3a lets add pv canonical hardlinks used byt bootloader
   mkdir -p $rootdir/trails/0/.pv
   ln $rootdir/trails/0/kernel.img $rootdir/trails/0/.pv/pv-kernel.img
-  ln $rootdir/trails/0/0pv-generic.cpio.xz $rootdir/trails/0/.pv/pv-initrd.img
+  ln $rootdir/trails/0/0pantavisor.cpio.xz $rootdir/trails/0/.pv/pv-initrd.img
 
   ## step 4 create /boot/uboot.txt for factory state
   set -x
