@@ -719,8 +719,8 @@ filesize=1c5
 loadargs=setenv bootargs "\${baseargs} pv_try=\${pv_try} pv_rev=\${boot_rev} panic=2 $\{args}"
 loadenv_mmc=load mmc \${disk}:\${mmcdata} \${scriptaddr} /boot/uboot.txt;
 loadenv=run loadenv_mmc; setenv pv_try; env import -b \${scriptaddr} 0x400; if env exists pv_try; then if env exists pv_trying && test \${pv_trying} = \${pv_try}; then setenv pv_trying; saveenv; setenv boot_rev \${pv_rev}; else setenv pv_trying \${pv_try}; saveenv; setenv boot_rev \${pv_trying}; fi; else setenv boot_rev \${pv_rev}; fi;
-loadstep_mmc=run loadenv; load mmc \${disk}:\${mmcdata} \${loadaddr} /trails/\${boot_rev}/.pv/pv-kernel.img; load mmc \${disk}:\${mmcdata} \${rdaddr} /trails/\${boot_rev}/.pv/pv-initrd.img; setenv \${rd_size} \${filesize};
-loadstep=run loadstep_mmc; setenv rd_size \${filesize}
+loadstep_mmc=run loadenv; load mmc \${disk}:\${mmcdata} \${loadaddr} /trails/\${boot_rev}/.pv/pv-kernel.img; load mmc \${disk}:\${mmcdata} \${rdaddr} /trails/\${boot_rev}/.pv/pv-initrd.img; setenv rd_size \${filesize}; setexpr rd_offset \${rdaddr} + \${rd_size}; setenv i 0; while load mmc \${disk}:\${mmcdata} \${rd_offset} /trails/\${boot_rev}/.pv/pv-initrd.img.\${i}; do setexpr i \${i} + 1; setexpr rd_size \${rd_size} + \${filesize}; setexpr rd_offset \${rd_offset} + \${filesize}; done
+loadstep=run loadstep_mmc
 bootcmd=run loadstep; run loadargs; bootm \${loadaddr} \${rdaddr}:\${rd_size}; echo "Failed to boot step, rebooting"; sleep 1; reset
 pv_fstype=mmc
 mmcboot=1
@@ -756,11 +756,12 @@ EOFa
 EOF
 
   ## create the lxc config for bpi-root plat
-  cat > $pvrd/bpi-root.lxc.config << EOF1
+  cat > $pvrd/bpi-root.lxc.config << EOFX
 lxc.logfile = /tmp/lxc.log
 lxc.loglevel = 1
 lxc.tty = 4
 lxc.pts = 1024
+
 lxc.autodev = 0
 lxc.hook.autodev = /volumes/bpi-config.squashfs/usr/bin/lxc.hook.autodev.bpi-root
 # Default cgroups - all denied except those whitelisted
@@ -770,6 +771,9 @@ lxc.utsname = bpipv
 lxc.rootfs = overlayfs:/volumes/bpi-root.squashfs:/storage/bpi-root.disk/upper
 # devices
 lxc.mount.auto = proc sys cgroup-full
+lxc.mount.entry = /dev dev none bind,rw,create=dir 0 0
+lxc.mount.entry = /system system none bind,rw,create=dir 0 0
+lxc.mount.entry = /etc/firmware etc/firmware none bind,rw,create=dir 0 0
 lxc.mount.entry = /storage/media/usb media/usb none bind,rw 0 0
 lxc.mount.entry = /storage/media/usb media/floppy none bind,rw 0 0
 lxc.mount.entry = /storage/media/usb media/cdrom none bind,rw 0 0
@@ -778,17 +782,27 @@ lxc.mount.entry=tmpfs /run tmpfs rw,nodev,relatime,mode=755 0 0
 # Mount cmdline overload from config squash
 lxc.mount.entry=/volumes/bpi-config.squashfs/proc/cmdline proc/cmdline none bind,create=file 0 0
 lxc.mount.entry=/volumes/bpi-config.squashfs/etc/mdev.conf etc/mdev.conf none bind,create=file 0 0
-EOF1
+
+EOFX
 
   mv $bootd/bananapi/$BPIBOARD/linux/uImage $pvrd/kernel.img
 
-  ## lets get pantavisor initrd
-  get_bpi_github 0pantavisor.cpio.xz
-  cp -f 0pantavisor.cpio.xz $pvrd/0pantavisor.cpio.xz
+  ## lets get pantavisor cpios
+  get_bpi_github $PVINITRD
+  cp -f $PVINITRD $pvrd/$PVINITRD
+
+  pvaddons_json=""
+  for pvaddon in $PVADDONS; do
+	get_bpi_github $pvaddon
+	cp -f $pvaddon $pvrd/$pvaddon
+	pvaddons_json="$pvaddons_json, \"$pvaddon\""
+  done
+
+  pvaddons_json=`echo $pvaddons_json | sed -e 's/^,//'`
 
   ## and off we go for the system manifest
   cat > $pvrd/pantavisor.json << EOF2
-{ "initrd": "0pantavisor.cpio.xz", "firmware": "/volumes/bpi-firmware.squashfs", "linux": "kernel.img", "platforms:": [ "bpi-root" ], "volumes": [ "bpi-root.squashfs", "bpi-config.squashfs", "bpi-firmware.squashfs", "modules.squashfs" ] }
+{ "initrd": "$PVINITRD", "firmware": "/volumes/bpi-firmware.squashfs", "linux": "kernel.img", "addons": [ $pvaddons_json ], "platforms": [ "bpi-root" ], "volumes": [ "bpi-root.squashfs", "bpi-config.squashfs", "bpi-firmware.squashfs", "modules.squashfs" ] }
 EOF2
   echo pantavisor.json:
   cat $pvrd/pantavisor.json 
@@ -804,14 +818,17 @@ EOF2
   ## step 3a lets add pv canonical hardlinks used byt bootloader
   mkdir -p $rootdir/trails/0/.pv
   ln $rootdir/trails/0/kernel.img $rootdir/trails/0/.pv/pv-kernel.img
-  ln $rootdir/trails/0/0pantavisor.cpio.xz $rootdir/trails/0/.pv/pv-initrd.img
+  ln $rootdir/trails/0/$PVINITRD $rootdir/trails/0/.pv/pv-initrd.img
+  a=0
+  for addon in $PVADDONS; do
+     ln $rootdir/trails/0/$addon $rootdir/trails/0/.pv/pv-initrd.img.$a
+     a=$(($a + 1))
+  done
 
   ## step 4 create /boot/uboot.txt for factory state
-  set -x
   mkdir -p $rootdir/boot
   echo -n -e "pv_rev=0\0" > $rootdir/boot/uboot.txt
   ls  $rootdir/boot/
-  set +x
 
   ## step 5 move objects to central repo place on disk
   mv $rootdir/trails/0/.pvr/objects $rootdir/objects
